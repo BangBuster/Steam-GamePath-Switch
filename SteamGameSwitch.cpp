@@ -1,8 +1,13 @@
 #include <iostream>
+#include <JustBanMe.h>
+#include <JustBanMe.cpp>
+#pragma warning(disable:4996)
 
 int main()
 {
-
+	DWORD pid = GetProcessIDByName("steam.exe");
+	std::cout << pid << "\n";
+	getchar();
 }
 
 /*
