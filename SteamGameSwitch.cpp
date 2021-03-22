@@ -4,14 +4,20 @@
 
 #pragma warning(disable:4996)
 
-const ADDRESS targetOffset = 0x2bf252;
+const ADDRESS targetOffset = 0x2bf22c;
 const DWORD targetSize = 0x5;
 
 int main()
 {
-	HANDLE handle = GetProcessHandleByName("steam.exe");
+	HANDLE handle = 0;
+	handle = GetProcessHandleByName("steam.exe");
 	DWORD pid = GetProcessIDByName("steam.exe");
-	std::cout << "pid: " << pid << "\n" << "handle: " << handle << "\n";
+	if (handle != NULL && pid != NULL) {
+		std::cout << "pid: " << pid << "\n" << "handle: " << handle << "\n";
+	}
+	else {
+		std::cout << "Failed\n";
+	}
 	
 	ADDRESS steamclient = GetModuleBaseAddress(pid, L"steamclient.dll");
 	std::cout << std::hex << steamclient << "\n";
@@ -22,9 +28,15 @@ int main()
 	std::cout << std::hex << originalBytes << "\0\n";
 
 	// Insert string
-	LPVOID stringLocation = VirtualAllocEx(handle, NULL, 255, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	LPCSTR path = "E:\\SteamLibrary\\steamapps\\common\\tempp2\\lol.exe";
-	WriteProcessMemory(handle, stringLocation, path, strlen(path), NULL);
+	LPVOID pathLocation = VirtualAllocEx(handle, NULL, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	pathLocation = LPVOID(ADDRESS(pathLocation) + 1);
+	LPCSTR path = "E:\\SteamLibrary\\steamapps\\common\\tempp2";
+	LPCSTR exe = "lol.exe";
+	LPVOID exeLocation = (LPVOID)((ADDRESS)pathLocation + strlen(path) + 1 + 1);
+	DWORD oldProtect;
+	VirtualProtectEx(handle, (LPVOID)pathLocation, MAX_PATH, PAGE_READWRITE, &oldProtect);
+	WriteProcessMemory(handle, pathLocation, path, strlen(path), NULL);
+	WriteProcessMemory(handle, exeLocation, exe, strlen(exe), NULL);
 
 	// NOP it out
 	BYTE* nopBytes = new BYTE[targetSize];
@@ -34,14 +46,28 @@ int main()
 	}
 
 	// Flatten with NOPs, then write jmp
-	DWORD oldProtect;
 	VirtualProtectEx(handle, (LPVOID)targetLocation, targetSize, PAGE_EXECUTE_READWRITE, &oldProtect);
 	WriteProcessMemory(handle, (LPVOID)targetLocation, nopBytes, targetSize, NULL);
-	size_t trampolineSize = 256;
+
+	size_t trampolineSize = 50;
 	LPVOID trampoline = VirtualAllocEx(handle, NULL, trampolineSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-	UCHAR bytecode[] = {
-		0xb8, // mov
+	UCHAR patch_stack[] = {
+		0xc7,
+		0x45,
+		0xf8,
+
+		// C7 45 F8 *addr*
+		// mov [ebp-8], addr
 	};
+	size_t patch_stackSize = sizeof(patch_stack) / sizeof(patch_stack[0]);
+
+	UCHAR patch_esi[] = {
+		0xbe
+		// BE *addr*
+		// mov esi, *addr*
+	};
+	size_t patch_esiSize = sizeof(patch_esi) / sizeof(patch_esi[0]);
+
 	UCHAR jmpPatch[] = {
 		0xe9
 	};
@@ -49,14 +75,22 @@ int main()
 	ADDRESS relativeDistance = (ADDRESS)trampoline - targetLocation - 0x5;
 	WriteProcessMemory(handle, (LPVOID)(targetLocation+0x1), &relativeDistance, 0x4, NULL); // write jmp address
 
-	WriteProcessMemory(handle, (LPVOID)trampoline, &bytecode, 0x1, NULL); // write first byte to trampoline
-	WriteProcessMemory(handle, (LPVOID)((ADDRESS)trampoline+0x1), &stringLocation, 0x4, NULL); // write string address
+	ADDRESS lastLocation = (ADDRESS)trampoline;
 
-	WriteProcessMemory(handle, (LPVOID)((ADDRESS)trampoline + 0x5), originalBytes+0x3, 0x5, NULL); // write stolen bytes
-	UCHAR pushEAX[] = {
-		0x50
-	};
-	WriteProcessMemory(handle, (LPVOID)((ADDRESS)trampoline + 0x10), &pushEAX, 0x1, NULL); // write stolen bytes
+	WriteProcessMemory(handle, (LPVOID)lastLocation, &patch_stack, patch_stackSize, NULL); // write patch_stack to trampoline
+	WriteProcessMemory(handle, (LPVOID)(lastLocation+= patch_stackSize), &pathLocation, 0x4, NULL); // write path address
+
+	WriteProcessMemory(handle, (LPVOID)(lastLocation+=0x4), &patch_esi, patch_esiSize, NULL); // write patch_esi to trampoline
+	WriteProcessMemory(handle, (LPVOID)(lastLocation += patch_esiSize), &exeLocation, 0x4, NULL); // write exe address
+
+
+	WriteProcessMemory(handle, (LPVOID)(lastLocation+=4), originalBytes, targetSize, NULL); // write stolen bytes
+
+	// write return jmp
+	WriteProcessMemory(handle, (LPVOID)(lastLocation += targetSize), &jmpPatch, 0x1, NULL);
+
+	relativeDistance = (ADDRESS)targetLocation + targetSize - lastLocation - 5;
+	WriteProcessMemory(handle, (LPVOID)(lastLocation + 1), &relativeDistance, 0x4, NULL);
 
 
 	VirtualProtectEx(handle, (LPVOID)targetLocation, targetSize, oldProtect, &oldProtect);
