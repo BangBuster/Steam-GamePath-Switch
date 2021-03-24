@@ -6,14 +6,37 @@
 
 #pragma warning(disable:4996)
 
-int main()
+int main(int argc, char* argv[])
 {
+	// Get path of exe from user
+	// commandline or explorer prompt
+	std::string input(MAX_PATH, '\0');
+	if (argc > 1) {
+		input = argv[1];
+	}
+	else {
+		OPENFILENAMEA ofn = { };
+		ofn.lStructSize = sizeof(ofn);
+		ofn.hwndOwner = NULL;
+		ofn.lpstrFilter = "Executables only\0*.exe;*.com\0\0";
+		ofn.lpstrFile = &input[0];
+		ofn.nMaxFile = MAX_PATH;
+		ofn.lpstrTitle = "Select Your Executable";
+		ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
+
+		GetOpenFileNameA(&ofn);
+	}
+	auto pos = input.find_last_of('\\');
+	std::string exe = input.substr(pos + 1);
+	std::string path = input.substr(0, pos);
+
 	const DWORD targetSize = 0x5;
 
 	HANDLE handle = GetProcessHandleByName("steam.exe");
 	DWORD pid = GetProcessIDByName("steam.exe");
 	if (handle == NULL || pid == NULL) {
 		std::cout << "Failed\n";
+		return 1;
 	}
 	
 	module steamclient = GetModule(pid, L"steamclient.dll");
@@ -27,12 +50,11 @@ int main()
 	
 	// Insert string
 	ADDRESS pathLocation = (ADDRESS)VirtualAllocEx(handle, NULL, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	pathLocation = ADDRESS(pathLocation) + 1;
-	LPCSTR path = "E:\\Games\\KSP RP0";
-	LPCSTR exe = "KSP_x64.exe";
-	ADDRESS exeLocation = (ADDRESS)pathLocation + strlen(path) + 1 + 1;
-	WriteProcessMemory(handle, (LPVOID)pathLocation, path, strlen(path), NULL);
-	WriteProcessMemory(handle, (LPVOID)exeLocation, exe, strlen(exe), NULL);
+	pathLocation++; // otherwise steam crashes
+
+	ADDRESS exeLocation = (ADDRESS)pathLocation + path.length() + 1;
+	WriteProcessMemory(handle, (LPVOID)pathLocation, path.c_str(), path.length(), NULL);
+	WriteProcessMemory(handle, (LPVOID)exeLocation, exe.c_str(), path.length(), NULL);
 
 	DWORD oldProtect;
 	VirtualProtectEx(handle, (LPVOID)toHook, targetSize, PAGE_EXECUTE_READWRITE, &oldProtect);
@@ -91,26 +113,4 @@ int main()
 
 
 	VirtualProtectEx(handle, (LPVOID)toHook, targetSize, oldProtect, &oldProtect);
-	getchar();
 }
-
-
-/*
-	const std::wstring title = L"Select a File";
-	std::wstring filename(MAX_PATH, L'\0');
-
-	OPENFILENAMEW ofn = { };
-	ofn.lStructSize = sizeof(ofn);
-	ofn.hwndOwner = NULL;
-	//ofn.lpstrFilter = L"Music (.mp3)\0*.mp3\0All\0*.*\0";
-	ofn.lpstrFile = &filename[0];
-	ofn.nMaxFile = MAX_PATH;
-	ofn.lpstrTitle = title.c_str();
-	ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
-
-	GetOpenFileNameW(&ofn);
-
-	std::wcout << "File you chose: " << filename << "\n";
-
-	return 1;
-	*/
