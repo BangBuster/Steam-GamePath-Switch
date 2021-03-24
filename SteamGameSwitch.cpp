@@ -1,107 +1,116 @@
 #include <iostream>
 #include <JustBanMe.h>
 #include <JustBanMe.cpp>
+#include <vector>
+#include <commdlg.h>
 
 #pragma warning(disable:4996)
 
-const ADDRESS targetOffset = 0x2bf22c;
-const DWORD targetSize = 0x5;
-
 int main()
 {
-	HANDLE handle = 0;
-	handle = GetProcessHandleByName("steam.exe");
+	const DWORD targetSize = 0x5;
+
+	HANDLE handle = GetProcessHandleByName("steam.exe");
 	DWORD pid = GetProcessIDByName("steam.exe");
-	if (handle != NULL && pid != NULL) {
-		std::cout << "pid: " << pid << "\n" << "handle: " << handle << "\n";
-	}
-	else {
+	if (handle == NULL || pid == NULL) {
 		std::cout << "Failed\n";
 	}
 	
-	ADDRESS steamclient = GetModuleBaseAddress(pid, L"steamclient.dll");
-	std::cout << std::hex << steamclient << "\n";
+	module steamclient = GetModule(pid, L"steamclient.dll");
+	
+	// signature is 5 bytes away the real target to allow unhooking
+	BYTE signature[] = {
+		0x56, 0x0F, 0x45, 0xC8, 0x8D, 0x45, 0xFC, 0x51, 0x68, '?', '?', '?', '?', 0x50
+	};
+	ADDRESS toHook = (ADDRESS)signatureScan(handle, steamclient, signature, sizeof(signature)).at(0)-5;
 
-	ADDRESS targetLocation = steamclient + targetOffset;
-	BYTE* originalBytes = new BYTE[targetSize];
-	ReadProcessMemory(handle, (LPVOID)targetLocation, originalBytes, targetSize, NULL);
-	std::cout << std::hex << originalBytes << "\0\n";
-
+	
 	// Insert string
-	LPVOID pathLocation = VirtualAllocEx(handle, NULL, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	pathLocation = LPVOID(ADDRESS(pathLocation) + 1);
-	LPCSTR path = "E:\\SteamLibrary\\steamapps\\common\\tempp2";
-	LPCSTR exe = "lol.exe";
-	LPVOID exeLocation = (LPVOID)((ADDRESS)pathLocation + strlen(path) + 1 + 1);
+	ADDRESS pathLocation = (ADDRESS)VirtualAllocEx(handle, NULL, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	pathLocation = ADDRESS(pathLocation) + 1;
+	LPCSTR path = "E:\\Games\\KSP RP0";
+	LPCSTR exe = "KSP_x64.exe";
+	ADDRESS exeLocation = (ADDRESS)pathLocation + strlen(path) + 1 + 1;
+	WriteProcessMemory(handle, (LPVOID)pathLocation, path, strlen(path), NULL);
+	WriteProcessMemory(handle, (LPVOID)exeLocation, exe, strlen(exe), NULL);
+
 	DWORD oldProtect;
-	VirtualProtectEx(handle, (LPVOID)pathLocation, MAX_PATH, PAGE_READWRITE, &oldProtect);
-	WriteProcessMemory(handle, pathLocation, path, strlen(path), NULL);
-	WriteProcessMemory(handle, exeLocation, exe, strlen(exe), NULL);
+	VirtualProtectEx(handle, (LPVOID)toHook, targetSize, PAGE_EXECUTE_READWRITE, &oldProtect);
 
-	// NOP it out
-	BYTE* nopBytes = new BYTE[targetSize];
-	// fill with NOPs
-	for (int i = 0; i < targetSize; i++) {
-		nopBytes[i] = 0x90;
-	}
+	BYTE* originalBytes = new BYTE[targetSize];
+	ReadProcessMemory(handle, (LPVOID)toHook, originalBytes, targetSize, NULL);
 
-	// Flatten with NOPs, then write jmp
-	VirtualProtectEx(handle, (LPVOID)targetLocation, targetSize, PAGE_EXECUTE_READWRITE, &oldProtect);
-	WriteProcessMemory(handle, (LPVOID)targetLocation, nopBytes, targetSize, NULL);
+	size_t caveSize = 50;
+	LPVOID cave = VirtualAllocEx(handle, NULL, caveSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	
+	// Create hook
+	ADDRESS hookJmpOffset = (ADDRESS)cave - toHook - 0x5;
+	std::vector<BYTE> hookcode = {
+		0xe9,
+		(BYTE)((hookJmpOffset >> (4 * 8)) & 0xFF),
+		(BYTE)((hookJmpOffset >> (1 * 8)) & 0xFF),
+		(BYTE)((hookJmpOffset >> (2 * 8)) & 0xFF),
+		(BYTE)((hookJmpOffset >> (3 * 8)) & 0xFF),
+	};
 
-	size_t trampolineSize = 50;
-	LPVOID trampoline = VirtualAllocEx(handle, NULL, trampolineSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-	UCHAR patch_stack[] = {
+	// Create shellcode
+	std::vector<BYTE> shellcode = {
 		0xc7,
 		0x45,
 		0xf8,
-
-		// C7 45 F8 *addr*
+		(BYTE)((pathLocation >> (4 * 8)) & 0xFF),
+		(BYTE)((pathLocation >> (1 * 8)) & 0xFF),
+		(BYTE)((pathLocation >> (2 * 8)) & 0xFF),
+		(BYTE)((pathLocation >> (3 * 8)) & 0xFF),
+		// 0xC7 0x45 0xF8 *addr*
 		// mov [ebp-8], addr
-	};
-	size_t patch_stackSize = sizeof(patch_stack) / sizeof(patch_stack[0]);
 
-	UCHAR patch_esi[] = {
-		0xbe
-		// BE *addr*
+		0xbe,
+		(BYTE)((exeLocation >> (4 * 8)) & 0xFF),
+		(BYTE)((exeLocation >> (1 * 8)) & 0xFF),
+		(BYTE)((exeLocation >> (2 * 8)) & 0xFF),
+		(BYTE)((exeLocation >> (3 * 8)) & 0xFF),
+		// 0xBE *addr*
 		// mov esi, *addr*
 	};
-	size_t patch_esiSize = sizeof(patch_esi) / sizeof(patch_esi[0]);
+	// Create the stolen bytes
+	for (int i = 0; i < targetSize; i++) {
+		shellcode.push_back((BYTE)originalBytes[i]);
+	}
+	// Create return
+	ADDRESS returnJmpOffset = (toHook + targetSize) - ((ADDRESS)cave + shellcode.size()) - 5;
+	shellcode.push_back(0xe9); 
+	shellcode.push_back((BYTE)((returnJmpOffset >> (4 * 8)) & 0xFF));
+	shellcode.push_back((BYTE)((returnJmpOffset >> (1 * 8)) & 0xFF));
+	shellcode.push_back((BYTE)((returnJmpOffset >> (2 * 8)) & 0xFF));
+	shellcode.push_back((BYTE)((returnJmpOffset >> (3 * 8)) & 0xFF));
 
-	UCHAR jmpPatch[] = {
-		0xe9
-	};
-	WriteProcessMemory(handle, (LPVOID)targetLocation, &jmpPatch, 0x1, NULL); // write jmp instruction
-	ADDRESS relativeDistance = (ADDRESS)trampoline - targetLocation - 0x5;
-	WriteProcessMemory(handle, (LPVOID)(targetLocation+0x1), &relativeDistance, 0x4, NULL); // write jmp address
-
-	ADDRESS lastLocation = (ADDRESS)trampoline;
-
-	WriteProcessMemory(handle, (LPVOID)lastLocation, &patch_stack, patch_stackSize, NULL); // write patch_stack to trampoline
-	WriteProcessMemory(handle, (LPVOID)(lastLocation+= patch_stackSize), &pathLocation, 0x4, NULL); // write path address
-
-	WriteProcessMemory(handle, (LPVOID)(lastLocation+=0x4), &patch_esi, patch_esiSize, NULL); // write patch_esi to trampoline
-	WriteProcessMemory(handle, (LPVOID)(lastLocation += patch_esiSize), &exeLocation, 0x4, NULL); // write exe address
-
-
-	WriteProcessMemory(handle, (LPVOID)(lastLocation+=4), originalBytes, targetSize, NULL); // write stolen bytes
-
-	// write return jmp
-	WriteProcessMemory(handle, (LPVOID)(lastLocation += targetSize), &jmpPatch, 0x1, NULL);
-
-	relativeDistance = (ADDRESS)targetLocation + targetSize - lastLocation - 5;
-	WriteProcessMemory(handle, (LPVOID)(lastLocation + 1), &relativeDistance, 0x4, NULL);
+	// apply hook here
+	WriteProcessMemory(handle, (LPVOID)toHook, &hookcode[0], hookcode.size(), NULL); // apply hook
+	WriteProcessMemory(handle, (LPVOID)cave, &shellcode[0], shellcode.size(), NULL);  // write shellcode
 
 
-	VirtualProtectEx(handle, (LPVOID)targetLocation, targetSize, oldProtect, &oldProtect);
+	VirtualProtectEx(handle, (LPVOID)toHook, targetSize, oldProtect, &oldProtect);
 	getchar();
 }
 
+
 /*
-* step 1: get module address
-* step 2: apply offset or signature scan
-* 
-* step 4: write string to codecave
-* step 3: save original bytes
-* step 5: patch instruction to "mov eax, *string location*"
-*/
+	const std::wstring title = L"Select a File";
+	std::wstring filename(MAX_PATH, L'\0');
+
+	OPENFILENAMEW ofn = { };
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = NULL;
+	//ofn.lpstrFilter = L"Music (.mp3)\0*.mp3\0All\0*.*\0";
+	ofn.lpstrFile = &filename[0];
+	ofn.nMaxFile = MAX_PATH;
+	ofn.lpstrTitle = title.c_str();
+	ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST;
+
+	GetOpenFileNameW(&ofn);
+
+	std::wcout << "File you chose: " << filename << "\n";
+
+	return 1;
+	*/
