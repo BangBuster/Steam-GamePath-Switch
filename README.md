@@ -1,6 +1,5 @@
 ## _Steam Game Path Switch_
 
-Allows you to 
 
 
 
