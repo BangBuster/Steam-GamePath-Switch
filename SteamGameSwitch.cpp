@@ -6,8 +6,24 @@
 
 #pragma warning(disable:4996)
 
+// Used for unhooking
+const BYTE hardcoded_bytes[] = { 0x8B, 0x45, 0xF8, 0x85, 0xC0 };
+
+void unhook(HANDLE handle, LPVOID toHook);
+
 int main(int argc, char* argv[])
 {
+	const DWORD targetSize = 0x5;
+
+	HANDLE handle = GetProcessHandleByName("steam.exe");
+	DWORD pid = GetProcessIDByName("steam.exe");
+	if (handle == NULL || pid == NULL) {
+		MessageBox(NULL, "Failed to find steam!", "", MB_ICONWARNING | MB_OK);
+		return 1;
+	}
+
+	module steamclient = GetModule(pid, L"steamclient.dll");
+
 	// Get path of exe from user
 	// commandline or explorer prompt
 	std::string input(MAX_PATH, '\0');
@@ -26,28 +42,33 @@ int main(int argc, char* argv[])
 
 		GetOpenFileNameA(&ofn);
 	}
-	auto pos = input.find_last_of('\\');
-	std::string exe = input.substr(pos + 1);
-	std::string path = input.substr(0, pos);
 
-	const DWORD targetSize = 0x5;
-
-	HANDLE handle = GetProcessHandleByName("steam.exe");
-	DWORD pid = GetProcessIDByName("steam.exe");
-	if (handle == NULL || pid == NULL) {
-		std::cout << "Failed\n";
-		return 1;
-	}
-	
-	module steamclient = GetModule(pid, L"steamclient.dll");
-	
 	// signature is 5 bytes away the real target to allow unhooking
-	BYTE signature[] = {
+	const BYTE signature[] = {
 		0x56, 0x0F, 0x45, 0xC8, 0x8D, 0x45, 0xFC, 0x51, 0x68, '?', '?', '?', '?', 0x50
 	};
-	ADDRESS toHook = (ADDRESS)signatureScan(handle, steamclient, signature, sizeof(signature)).at(0)-5;
+	ADDRESS toHook = (ADDRESS)signatureScan(handle, steamclient, signature, sizeof(signature)).at(0) - 5;
 
+	// unhook and return original bytes if exe wasnt chosen
+	if (input.at(0) == NULL) {
+		unhook(handle, (LPVOID)toHook);
+		return 0;
+	}
+
+	std::string exe, path;
+	auto pos = input.find_last_of('\\');
+	exe = input.substr(pos + 1);
+	path = input.substr(0, pos);
 	
+
+	BYTE* originalBytes = new BYTE[targetSize];
+	ReadProcessMemory(handle, (LPVOID)toHook, originalBytes, targetSize, NULL);
+	// if a hook already exists
+	if (originalBytes[0] == 0xe9) {
+		unhook(handle, (LPVOID)toHook);
+		originalBytes = (BYTE*)&hardcoded_bytes;
+	}
+
 	// Insert string
 	ADDRESS pathLocation = (ADDRESS)VirtualAllocEx(handle, NULL, MAX_PATH, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 	pathLocation++; // otherwise steam crashes
@@ -59,9 +80,7 @@ int main(int argc, char* argv[])
 	DWORD oldProtect;
 	VirtualProtectEx(handle, (LPVOID)toHook, targetSize, PAGE_EXECUTE_READWRITE, &oldProtect);
 
-	BYTE* originalBytes = new BYTE[targetSize];
-	ReadProcessMemory(handle, (LPVOID)toHook, originalBytes, targetSize, NULL);
-
+	
 	size_t caveSize = 50;
 	LPVOID cave = VirtualAllocEx(handle, NULL, caveSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 	
@@ -113,4 +132,9 @@ int main(int argc, char* argv[])
 
 
 	VirtualProtectEx(handle, (LPVOID)toHook, targetSize, oldProtect, &oldProtect);
+}
+
+void unhook(HANDLE handle, LPVOID toHook) {
+	
+	WriteProcessMemory(handle, toHook, &hardcoded_bytes, sizeof(hardcoded_bytes), NULL);
 }
