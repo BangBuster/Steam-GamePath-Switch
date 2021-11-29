@@ -130,6 +130,13 @@ int main(int argc, char* argv[])
 
 
 	std::vector<BYTE> modShellcode = {
+		0x83,
+		0xfe,
+		0x00, // cmp esi, 0 
+		
+		0x74, // je
+		0x10,
+
 		0xc7, // 
 		0x44, // 
 		0x24, // mov DWORD PTR [esp+0x4],0x5
